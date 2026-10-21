@@ -1,52 +1,143 @@
-name: Build Unsigned IPA
+name: Build Unsigned IPA (prepared workspace)
 
 on:
   workflow_dispatch:
+    inputs:
+      target:
+        description: Minimum iOS version (also selects the target CPU)
+        type: choice
+        options: [ios26, ios18]
+        default: ios26
+
+permissions:
+  contents: read
 
 jobs:
+  check-inputs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require game build inputs
+        env:
+          WORKSPACE_URL: ${{ secrets.DM_WORKSPACE_URL }}
+        run: |
+          if [ -z "$WORKSPACE_URL" ]; then
+            echo '::error::Missing game build inputs. Source code alone cannot produce a playable IPA. Configure the DM_WORKSPACE_URL repository secret with an HTTPS download URL for your prepared dm-work archive; see ios/README.md and PORTING.md.'
+            cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          ## Game build inputs required
+          This repository contains no game code or translated shaders. They must be generated from your own **manosaba 2.0.4b** dump before building the iOS app.
+
+          Set the repository Actions secret `DM_WORKSPACE_URL` to an HTTPS download URL for a `.tar.gz` of the prepared workspace. Archive **the contents** of `dm-work`, so `build/` and optional `data/` are at its root. Do not include keys, local.env, saves, logs, or developer credentials.
+
+          Required inputs, at the paths in `games/manosaba/game.json`:
+          - `build/cache/dm/out/manosaba-2.0.4b-r1-keypage/`: main, sdk, subsdk0 `.patched.bin`, `.fixups.tsv`, and `.gates.tsv`, generated with this revision's rewriter.
+          - `build/mano/shader_map.tsv`.
+          - `build/ios/dmsh_b/b-<DMSH_CHAIN>/`: iOS `.metallib` files and their reflection `.json` files for this revision's shader chain.
+          - Optional: `build/mano/c1_full.tsv` and `data/manosaba/AppIcon1024.png`.
+
+          Preparation: [PORTING.md](https://github.com/lbvic/manosaba-ios/blob/main/PORTING.md), sections 3 and 5. A raw NSP/XCI or ExeFS/RomFS dump alone is not a prepared workspace.
+
+          Once the secret is configured, select **Run workflow** on the latest main branch. Re-running an old run uses its original commit.
+          EOF
+            exit 1
+          fi
+          case "$WORKSPACE_URL" in
+            https://*) ;;
+            *) echo '::error::DM_WORKSPACE_URL must use HTTPS'; exit 1 ;;
+          esac
+
   build-ipa:
-    runs-on: macos-15
+    needs: check-inputs
+    runs-on: macos-26
     timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    env:
+      DM_ROOT: ${{ runner.temp }}/dm-work
+      DM_GAME: manosaba
+      DM_BUNDLE_ID: com.lbvic.manosaba
+      DM_TEAM_ID: ''
+      DM_FREE_ACCOUNT: '1'
+      DM_IOS_M3: ${{ inputs.target == 'ios18' && '1' || '0' }}
+      DM_LOCAL_ENV: ${{ runner.temp }}/ci-local.env
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
-      - name: Set up Xcode
-        run: sudo xcode-select -s /Applications/Xcode.app
-
-      - name: Install Homebrew dependencies
-        run: |
-          brew install xcodegen dotnet spirv-cross libvpx libimobiledevice
-
-      - name: Prepare local.env
-        run: |
-          # 在 ios 目录下生成正确的配置文件
-          mkdir -p ios
-          cat > ios/local.env << 'EOF'
-          DM_FREE_ACCOUNT=1
-          DM_BUNDLE_ID=com.lbvic.manosaba
-          DM_TEAM_ID=
-          DM_DEVICE=
-          EOF
-          # 顺便在根目录也留一份以防万一
-          cp ios/local.env local.env
-
-      - name: Patch run.sh to skip host tests
-        run: |
-          # 把测试命令注释掉，防止因为没有声卡导致测试失败
-          sed -i '' 's/make -C host\/tests run/# &/' ios/run.sh
-
-      - name: Build Unsigned IPA
-        run: |
-          export DM_ROOT=~/dm-work
-          ios/run.sh ipa
+      - name: Download prepared workspace
         env:
-          CODE_SIGNING_ALLOWED: NO
+          WORKSPACE_URL: ${{ secrets.DM_WORKSPACE_URL }}
+        run: |
+          mkdir -p "$DM_ROOT"
+          # Explicit configuration file, with settings supplied through job env.
+          : > "$DM_LOCAL_ENV"
+          curl --fail --silent --show-error --location --retry 3 \
+            --proto '=https' --proto-redir '=https' \
+            "$WORKSPACE_URL" -o "$RUNNER_TEMP/dm-work.tar.gz"
+          python3 - <<'PY'
+          import os, tarfile
+          with tarfile.open(os.path.join(os.environ['RUNNER_TEMP'], 'dm-work.tar.gz'), 'r:gz') as archive:
+              archive.extractall(os.environ['DM_ROOT'], filter='data')
+          PY
+
+      - name: Validate modules and iOS shaders
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, re
+          root = pathlib.Path(os.environ['DM_ROOT'])
+          profile = json.loads(pathlib.Path('games/manosaba/game.json').read_text(encoding='utf-8'))
+          ws = profile['workspace']
+          product = root / ws['product']
+          required = [product / (m + suffix) for m in profile['modules']
+                      for suffix in ('.patched.bin', '.fixups.tsv', '.gates.tsv')]
+          required.append(root / ws['shader_map'])
+          missing = [str(p.relative_to(root)) for p in required if not p.is_file() or not p.stat().st_size]
+          if missing:
+              raise SystemExit('Missing workspace files:\n' + '\n'.join(missing))
+          stamp = hashlib.sha256(pathlib.Path('tools/patch_nso.py').read_bytes()
+                                 + pathlib.Path('games/manosaba/rules.py').read_bytes()).hexdigest()[:16]
+          for m in profile['modules']:
+              headers = dict(line[2:].split() for line in (product / (m + '.fixups.tsv')).read_text(encoding='utf-8').splitlines() if line.startswith('# '))
+              if int(headers.get('REWRITER', '0'), 16) != int(stamp, 16):
+                  raise SystemExit('Rebuild the game modules using this revision: tools/build_product.sh')
+          chain = re.search(r'#define DMSH_CHAIN "([^"]+)"', pathlib.Path('gfx/nvn/dmsh_chain.h').read_text(encoding='utf-8')).group(1)
+          shaders = root / ws['msl_ios'] / ('b-' + chain)
+          libraries = list(shaders.glob('*_b.metallib'))
+          if not libraries:
+              raise SystemExit('No iOS shader libraries for chain ' + chain + ' in ' + str(shaders))
+          for lib in libraries:
+              if not lib.stat().st_size or not lib.with_suffix('.json').is_file():
+                  raise SystemExit('Missing shader library or reflection: ' + str(lib))
+          print('Validated modules and', len(libraries), 'iOS shader libraries; chain', chain)
+          PY
+
+      - name: Set up Xcode and XcodeGen
+        run: |
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          command -v xcodegen >/dev/null || brew install xcodegen
+
+      - name: Build unsigned IPA
+        run: bash ios/run.sh ipa
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: manosaba-unsigned-ipa
-          path: "**/*.ipa"
+          name: manosaba-${{ inputs.target }}-unsigned-ipa
+          path: ${{ runner.temp }}/dm-work/run/ios/*.ipa
           if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: manosaba-${{ inputs.target }}-build-log
+          path: ${{ runner.temp }}/dm-work/run/ios/build.log
+          if-no-files-found: ignore
+          retention-days: 1
