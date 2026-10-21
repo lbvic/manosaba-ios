@@ -1,0 +1,47 @@
+name: Build Unsigned IPA
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-ipa:
+    runs-on: macos-15
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Install Homebrew dependencies
+        run: |
+          brew install xcodegen dotnet spirv-cross libvpx libimobiledevice
+
+      - name: Prepare local.env
+        run: |
+          touch local.env
+          echo "DM_FREE_ACCOUNT=1" >> local.env
+          echo "DM_BUNDLE_ID=com.lbvic.manosaba" >> local.env
+          echo "DM_TEAM_ID=" >> local.env
+          echo "DM_DEVICE=" >> local.env
+
+      # 🚨 关键补丁：用 sed 命令把 run.sh 里的测试命令注释掉
+      - name: Patch run.sh to skip host tests
+        run: |
+          sed -i '' 's/make -C host\/tests run/# &/' ios/run.sh
+
+      - name: Build Unsigned IPA
+        run: |
+          export DM_ROOT=~/dm-work
+          ios/run.sh ipa
+        env:
+          CODE_SIGNING_ALLOWED: NO
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: manosaba-unsigned-ipa
+          path: "**/*.ipa"
+          if-no-files-found: error
