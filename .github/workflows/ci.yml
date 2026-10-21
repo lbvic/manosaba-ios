@@ -53,13 +53,11 @@ jobs:
       run:
         shell: bash
     env:
-      DM_ROOT: ${{ runner.temp }}/dm-work
       DM_GAME: manosaba
       DM_BUNDLE_ID: com.lbvic.manosaba
       DM_TEAM_ID: ''
       DM_FREE_ACCOUNT: '1'
       DM_IOS_M3: ${{ inputs.target == 'ios18' && '1' || '0' }}
-      DM_LOCAL_ENV: ${{ runner.temp }}/ci-local.env
 
     steps:
       - name: Checkout
@@ -70,7 +68,11 @@ jobs:
       - name: Download prepared workspace
         env:
           WORKSPACE_URL: ${{ secrets.DM_WORKSPACE_URL }}
+          DM_ROOT: ${{ runner.temp }}/dm-work
+          DM_LOCAL_ENV: ${{ runner.temp }}/ci-local.env
         run: |
+          echo "DM_ROOT=$DM_ROOT" >> "$GITHUB_ENV"
+          echo "DM_LOCAL_ENV=$DM_LOCAL_ENV" >> "$GITHUB_ENV"
           mkdir -p "$DM_ROOT"
           # Explicit configuration file, with settings supplied through job env.
           : > "$DM_LOCAL_ENV"
