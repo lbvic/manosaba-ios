@@ -21,15 +21,20 @@ jobs:
 
       - name: Prepare local.env
         run: |
-          touch local.env
-          echo "DM_FREE_ACCOUNT=1" >> local.env
-          echo "DM_BUNDLE_ID=com.lbvic.manosaba" >> local.env
-          echo "DM_TEAM_ID=" >> local.env
-          echo "DM_DEVICE=" >> local.env
+          # 在 ios 目录下生成正确的配置文件
+          mkdir -p ios
+          cat > ios/local.env << 'EOF'
+          DM_FREE_ACCOUNT=1
+          DM_BUNDLE_ID=com.lbvic.manosaba
+          DM_TEAM_ID=
+          DM_DEVICE=
+          EOF
+          # 顺便在根目录也留一份以防万一
+          cp ios/local.env local.env
 
-      # 🚨 关键补丁：用 sed 命令把 run.sh 里的测试命令注释掉
       - name: Patch run.sh to skip host tests
         run: |
+          # 把测试命令注释掉，防止因为没有声卡导致测试失败
           sed -i '' 's/make -C host\/tests run/# &/' ios/run.sh
 
       - name: Build Unsigned IPA
