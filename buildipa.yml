@@ -1,0 +1,42 @@
+name: Build Unsigned IPA
+
+on:
+  workflow_dispatch:   # 支持手动点击运行
+
+jobs:
+  build-ipa:
+    runs-on: macos-26  # 使用自带 Xcode 的苹果系统镜像
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Prepare local.env
+        run: |
+          if [ -f local.env.example ]; then
+            cp local.env.example local.env
+          else
+            touch local.env
+          fi
+          echo "DM_FREE_ACCOUNT=1" >> local.env
+
+      - name: Build Unsigned IPA
+        run: |
+          export DM_ROOT=~/dm-work
+          ios/run.sh ipa
+        env:
+          CODE_SIGNING_ALLOWED: NO   # 强制跳过签名
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: manosaba-unsigned-ipa
+          path: "**/*.ipa"
+          if-no-files-found: error
